@@ -387,7 +387,7 @@
     var scenes = (window.RCCM_STORIES || {})[q.id];
     if (!scenes) {
       var empty = el("div", "story-empty");
-      empty.appendChild(el("p", null, "この設問の紙芝居はまだありません。いまは(1)インフラ老朽化で試作しています。"));
+      empty.appendChild(el("p", null, "この設問の紙芝居はまだありません。"));
       var go = el("button", "tool", "(1)の紙芝居を見る");
       go.type = "button";
       go.addEventListener("click", function () { state.q = 1; save(); render(); });
