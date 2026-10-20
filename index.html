@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EDF1F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#12171C" media="(prefers-color-scheme: dark)">
+<title>RCCM 問題3 暗記ノート</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-inner">
+    <h1>RCCM 問題3 暗記ノート</h1>
+    <p class="progress" id="progress"></p>
+  </div>
+  <nav class="picker" id="picker" aria-label="設問を選ぶ"></nav>
+</header>
+
+<main id="main">
+  <section class="sheet">
+    <div class="sheet-head">
+      <h2 id="qtitle"></h2>
+      <button type="button" class="done-toggle" id="doneToggle" aria-pressed="false"></button>
+    </div>
+
+    <details class="prompt" id="prompt">
+      <summary>設問を見る</summary>
+      <div id="promptBody"></div>
+    </details>
+
+    <div class="modes" role="tablist" aria-label="練習方法">
+      <button type="button" role="tab" data-mode="read">読む</button>
+      <button type="button" role="tab" data-mode="outline">骨子</button>
+      <button type="button" role="tab" data-mode="cloze">穴埋め</button>
+      <button type="button" role="tab" data-mode="write">書く</button>
+    </div>
+
+    <p class="hint" id="hint"></p>
+    <div class="tools" id="tools"></div>
+    <div class="answer" id="view" aria-live="polite"></div>
+  </section>
+</main>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
