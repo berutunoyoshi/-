@@ -6,6 +6,7 @@
   var MIN = 1200, MAX = 1600;
 
   var HINTS = {
+    story: "答案の流れを、絵と物語でつかみます。左右のスワイプかボタンでめくります。",
     read: "見本答案を通して読みます。「 」の用語は青字です。読み上げ中は行をタップするとそこから読みます。",
     outline: "各項目の書き出しだけを表示します。続きを思い出してからタップして確認します。",
     cloze: "指定用語と数値を隠しています。答えを思い浮かべてからタップしてめくります。",
@@ -372,6 +373,142 @@
     update();
   }
 
+
+  // ---------- 紙芝居 ----------
+  var show = { timer: null, playing: false, go: null };
+  function stopShow() {
+    show.playing = false;
+    clearTimeout(show.timer);
+    if (synth) synth.cancel();
+    if (show.btn) show.btn.textContent = "▶ 自動で上演";
+  }
+
+  function renderStory(q, view) {
+    var scenes = (window.RCCM_STORIES || {})[q.id];
+    if (!scenes) {
+      var empty = el("div", "story-empty");
+      empty.appendChild(el("p", null, "この設問の紙芝居はまだありません。いまは(1)インフラ老朽化で試作しています。"));
+      var go = el("button", "tool", "(1)の紙芝居を見る");
+      go.type = "button";
+      go.addEventListener("click", function () { state.q = 1; save(); render(); });
+      empty.appendChild(go);
+      view.appendChild(empty);
+      return;
+    }
+    state.page = state.page || {};
+    var idx = Math.min(state.page[q.id] || 0, scenes.length - 1);
+
+    var stage = el("div", "stage");
+    var card = el("div", "card");
+    stage.appendChild(card);
+    var meta = el("p", "story-ref");
+    var title = el("h3", "story-title");
+    var text = el("p", "story-text");
+    var terms = el("ul", "chips");
+    var extra = el("div", "story-extra");
+    var nav = el("div", "story-nav");
+    var prev = el("button", "tool", "← 前へ");
+    var next = el("button", "tool", "次へ →");
+    var count = el("span", "tool-note");
+    prev.type = next.type = "button";
+    nav.appendChild(prev); nav.appendChild(count); nav.appendChild(next);
+
+    function draw(dir) {
+      var s = scenes[idx];
+      card.innerHTML = (window.RCCM_ART[s.art] || function () { return ""; })();
+      if (dir && !reduceMotion()) {
+        card.classList.remove("enter-next", "enter-prev");
+        void card.offsetWidth;
+        card.classList.add(dir > 0 ? "enter-next" : "enter-prev");
+      }
+      meta.textContent = s.ref ? "答案の " + s.ref + " にあたる場面" : "はじまり";
+      title.textContent = s.title;
+      text.textContent = s.text;
+      terms.innerHTML = "";
+      s.terms.forEach(function (t) { terms.appendChild(el("li", "used", "「" + t + "」")); });
+      extra.innerHTML = "";
+      if (idx === scenes.length - 1) {
+        var toRead = el("button", "tool", "この流れで答案を読む");
+        toRead.type = "button";
+        toRead.addEventListener("click", function () { state.mode = "read"; save(); render(); });
+        extra.appendChild(toRead);
+      }
+      count.textContent = (idx + 1) + " / " + scenes.length;
+      prev.disabled = idx === 0;
+      next.disabled = idx === scenes.length - 1;
+      state.page[q.id] = idx;
+      save();
+    }
+    function go(d) {
+      var n = idx + d;
+      if (n < 0 || n >= scenes.length) return false;
+      idx = n; draw(d); return true;
+    }
+    show.go = go;
+    prev.addEventListener("click", function () { stopShow(); go(-1); });
+    next.addEventListener("click", function () { stopShow(); go(1); });
+
+    // スワイプでめくる
+    var sx = null;
+    stage.addEventListener("pointerdown", function (e) { sx = e.clientX; });
+    stage.addEventListener("pointerup", function (e) {
+      if (sx == null) return;
+      var dx = e.clientX - sx; sx = null;
+      if (Math.abs(dx) > 40) { stopShow(); go(dx < 0 ? 1 : -1); }
+    });
+
+    // 自動で上演（読み上げが使えれば語りを読む）
+    var playBtn = el("button", "tool", "▶ 自動で上演");
+    playBtn.type = "button";
+    show.btn = playBtn;
+    function perform() {
+      if (!show.playing) return;
+      var s = scenes[idx];
+      var after = function () {
+        if (!show.playing) return;
+        show.timer = setTimeout(function () {
+          if (!show.playing) return;
+          if (!go(1)) { stopShow(); return; }
+          perform();
+        }, 700);
+      };
+      if (synth && typeof SpeechSynthesisUtterance !== "undefined" && jaVoice()) {
+        var u = new SpeechSynthesisUtterance(s.title + "。" + s.text);
+        u.lang = "ja-JP"; u.voice = jaVoice(); u.rate = state.rate || 1;
+        u.onend = after;
+        u.onerror = function (e) { if (e.error !== "interrupted" && e.error !== "canceled") after(); };
+        synth.speak(u);
+      } else {
+        show.timer = setTimeout(after, Math.max(4000, s.text.length * 110 / (state.rate || 1)));
+      }
+    }
+    playBtn.addEventListener("click", function () {
+      if (show.playing) { stopShow(); return; }
+      if (idx === scenes.length - 1) { idx = 0; draw(-1); }
+      show.playing = true;
+      playBtn.textContent = "■ 止める";
+      if (synth) synth.cancel();
+      perform();
+    });
+    tools().appendChild(playBtn);
+
+    view.appendChild(stage);
+    view.appendChild(meta);
+    view.appendChild(title);
+    view.appendChild(text);
+    view.appendChild(terms);
+    view.appendChild(extra);
+    view.appendChild(nav);
+    draw(0);
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if (state.mode !== "story" || !show.go) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (e.key === "ArrowRight") { stopShow(); show.go(1); }
+    if (e.key === "ArrowLeft") { stopShow(); show.go(-1); }
+  });
+
   function tools() { return document.getElementById("tools"); }
 
   function addToggleAll(items, setter) {
@@ -387,6 +524,7 @@
   // ---------- main render ----------
   function render() {
     stopSpeech();
+    stopShow();
     speech.nodes = null;
     var q = current();
     renderPicker();
@@ -394,7 +532,7 @@
     var view = document.getElementById("view");
     view.innerHTML = "";
     tools().innerHTML = "";
-    ({ read: renderRead, outline: renderOutline, cloze: renderCloze, write: renderWrite })[state.mode](q, view);
+    ({ story: renderStory, read: renderRead, outline: renderOutline, cloze: renderCloze, write: renderWrite })[state.mode](q, view);
   }
 
   document.querySelectorAll(".modes button").forEach(function (b) {
@@ -403,7 +541,7 @@
 
   // 音声の一覧は後から読み込まれることがある
   if (synth && synth.addEventListener) synth.addEventListener("voiceschanged", function () {});
-  window.addEventListener("pagehide", stopSpeech);
+  window.addEventListener("pagehide", function () { stopSpeech(); stopShow(); });
 
   render();
 })();
