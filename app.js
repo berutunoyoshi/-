@@ -6,7 +6,7 @@
   var MIN = 1200, MAX = 1600;
 
   var HINTS = {
-    read: "見本答案を通して読みます。「 」の用語は青字で示しています。",
+    read: "見本答案を通して読みます。「 」の用語は青字です。読み上げ中は行をタップするとそこから読みます。",
     outline: "各項目の書き出しだけを表示します。続きを思い出してからタップして確認します。",
     cloze: "指定用語と数値を隠しています。答えを思い浮かべてからタップしてめくります。",
     write: "何も見ずに答案を書きます。下書きはこの端末に自動で保存されます。"
@@ -101,14 +101,113 @@
   }
 
   // ---------- modes ----------
-  function renderRead(q, view) {
+  function renderRead(q, view, asModel) {
+    var nodes = [];
     lines(q).forEach(function (l) {
       var k = kind(l);
       var tag = k === "major" ? "h3" : k === "minor" ? "h4" : "p";
-      view.appendChild(withTerms(el(tag, k), l));
+      var n = withTerms(el(tag, k), l);
+      nodes.push({ node: n, text: l });
+      view.appendChild(n);
     });
-    var c = countChars(q.answer);
-    tools().appendChild(el("span", "tool-note", "見本 " + c + "字"));
+    if (asModel) return;
+    addSpeech(nodes);
+    tools().appendChild(el("span", "tool-note", "見本 " + countChars(q.answer) + "字"));
+  }
+
+  // ---------- 読み上げ（Web Speech API） ----------
+  var synth = window.speechSynthesis;
+  var speech = { idx: -1, nodes: null, playing: false };
+
+  function jaVoice() {
+    if (!synth) return null;
+    var vs = synth.getVoices().filter(function (v) { return /^ja(-|_|$)/i.test(v.lang); });
+    return vs[0] || null;
+  }
+
+  // 記号を読みやすい言葉に置き換える
+  function speakable(text) {
+    return text
+      .replace(/^①/, "設問1。")
+      .replace(/^②/, "設問2。")
+      .replace(/^\((\d)\)/, "項目$1。")
+      .replace(/^・/, "")
+      .replace(/[「」]/g, "")
+      .replace(/BIM\/CIM/g, "ビム・シム")
+      .replace(/\//g, "・");
+  }
+
+  function stopSpeech() {
+    speech.playing = false;
+    if (synth) synth.cancel();
+    if (speech.nodes && speech.nodes[speech.idx]) speech.nodes[speech.idx].node.classList.remove("speaking");
+    speech.idx = -1;
+    if (speech.btn) speech.btn.textContent = "▶ 読み上げ";
+  }
+
+  function speakFrom(i) {
+    if (!speech.playing || !speech.nodes || i >= speech.nodes.length) { stopSpeech(); return; }
+    if (speech.nodes[speech.idx]) speech.nodes[speech.idx].node.classList.remove("speaking");
+    speech.idx = i;
+    var item = speech.nodes[i];
+    item.node.classList.add("speaking");
+    item.node.scrollIntoView({ block: "center", behavior: reduceMotion() ? "auto" : "smooth" });
+    var u = new SpeechSynthesisUtterance(speakable(item.text));
+    u.lang = "ja-JP";
+    var v = jaVoice();
+    if (v) u.voice = v;
+    u.rate = state.rate || 1;
+    u.onend = function () { if (speech.playing && speech.idx === i) speakFrom(i + 1); };
+    u.onerror = function (e) { if (e.error !== "interrupted" && e.error !== "canceled") stopSpeech(); };
+    synth.speak(u);
+  }
+
+  function reduceMotion() {
+    return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function addSpeech(nodes) {
+    if (!synth || typeof SpeechSynthesisUtterance === "undefined") {
+      tools().appendChild(el("span", "tool-note", "このブラウザは読み上げに対応していません"));
+      return;
+    }
+    speech.nodes = nodes;
+    var btn = el("button", "tool", "▶ 読み上げ");
+    btn.type = "button";
+    speech.btn = btn;
+    btn.addEventListener("click", function () {
+      if (speech.playing) { stopSpeech(); return; }
+      start(Math.max(0, speech.idx));
+    });
+    function start(i) {
+      synth.cancel();
+      speech.playing = true;
+      btn.textContent = "■ 停止";
+      speakFrom(i);
+    }
+    var rate = el("select", "tool");
+    rate.setAttribute("aria-label", "読み上げの速さ");
+    [["0.8", "ゆっくり"], ["1", "ふつう"], ["1.3", "速い"], ["1.6", "とても速い"]].forEach(function (r) {
+      var o = el("option", null, r[1]);
+      o.value = r[0];
+      if (String(state.rate || 1) === r[0]) o.selected = true;
+      rate.appendChild(o);
+    });
+    rate.addEventListener("change", function () {
+      state.rate = parseFloat(rate.value);
+      save();
+      if (speech.playing) start(speech.idx);
+    });
+    // 行をタップすると、その行から読み上げる
+    nodes.forEach(function (n, i) {
+      n.node.classList.add("tappable");
+      n.node.addEventListener("click", function () { if (speech.playing) start(i); });
+    });
+    tools().appendChild(btn);
+    tools().appendChild(rate);
+    if (!jaVoice() && synth.getVoices().length) {
+      tools().appendChild(el("span", "tool-note", "日本語の音声が見つかりません。端末の設定で日本語の音声を追加してください"));
+    }
   }
 
   function splitLead(l) {
@@ -260,7 +359,7 @@
     showBtn.addEventListener("click", function () {
       model.hidden = !model.hidden;
       showBtn.textContent = model.hidden ? "見本と比べる" : "見本を閉じる";
-      if (!model.hidden && !model.childNodes.length) renderRead(q, model);
+      if (!model.hidden && !model.childNodes.length) renderRead(q, model, true);
     });
     var clearBtn = el("button", "tool", "下書きを消す");
     clearBtn.type = "button";
@@ -287,6 +386,8 @@
 
   // ---------- main render ----------
   function render() {
+    stopSpeech();
+    speech.nodes = null;
     var q = current();
     renderPicker();
     renderHead(q);
@@ -299,6 +400,10 @@
   document.querySelectorAll(".modes button").forEach(function (b) {
     b.addEventListener("click", function () { state.mode = b.dataset.mode; save(); render(); });
   });
+
+  // 音声の一覧は後から読み込まれることがある
+  if (synth && synth.addEventListener) synth.addEventListener("voiceschanged", function () {});
+  window.addEventListener("pagehide", stopSpeech);
 
   render();
 })();

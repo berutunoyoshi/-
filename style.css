@@ -241,3 +241,8 @@ h2 { font-size: 1.2rem; line-height: 1.5; margin: 0; }
   .sheet { padding: 1.5rem 2rem 2rem; }
 }
 .lead:focus-visible { outline: 3px solid var(--term); outline-offset: 2px; }
+
+/* 読み上げ */
+.tappable { cursor: pointer; }
+.speaking { background: var(--band); box-shadow: -.4rem 0 0 var(--band), .4rem 0 0 var(--band); border-radius: 2px; }
+select.tool { background: var(--sheet); }
