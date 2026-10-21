@@ -273,3 +273,6 @@ select.tool { background: var(--sheet); }
 @media (prefers-reduced-motion: reduce) {
   .card.enter-next, .card.enter-prev { animation: none; }
 }
+
+.foot { max-width: 46rem; margin: 0 auto; padding: 0 1rem 2rem; font-size: .8rem; color: var(--muted); }
+.foot:empty { display: none; }

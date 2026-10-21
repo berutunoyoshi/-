@@ -112,13 +112,17 @@
       view.appendChild(n);
     });
     if (asModel) return;
-    addSpeech(nodes);
+    addSpeech(nodes, q.id);
     tools().appendChild(el("span", "tool-note", "見本 " + countChars(q.answer) + "字"));
   }
 
-  // ---------- 読み上げ（Web Speech API） ----------
+  // ---------- 読み上げ ----------
+  // VOICEVOX で作った音声（audio/manifest.js）があればそれを再生し、
+  // なければブラウザの音声合成（Web Speech API）で読み上げる。
   var synth = window.speechSynthesis;
-  var speech = { idx: -1, nodes: null, playing: false };
+  var hasSynth = !!synth && typeof SpeechSynthesisUtterance !== "undefined";
+  var speech = { idx: -1, nodes: null, playing: false, qid: null };
+  var player = null;
 
   function jaVoice() {
     if (!synth) return null;
@@ -126,21 +130,72 @@
     return vs[0] || null;
   }
 
-  // 記号を読みやすい言葉に置き換える
-  function speakable(text) {
+  // 記号を言葉に置き換える（tools/generate_voice.py の speakable_base と同じ処理）
+  function speakableBase(text) {
     return text
       .replace(/^①/, "設問1。")
       .replace(/^②/, "設問2。")
       .replace(/^\((\d)\)/, "項目$1。")
       .replace(/^・/, "")
-      .replace(/[「」]/g, "")
-      .replace(/BIM\/CIM/g, "ビム・シム")
-      .replace(/\//g, "・");
+      .replace(/[「」]/g, "");
+  }
+  function withReadings(text) {
+    (window.RCCM_READINGS || []).forEach(function (r) { text = text.split(r[0]).join(r[1]); });
+    return text;
+  }
+
+  function audioFile(qid, kindName, i, base) {
+    var m = window.RCCM_AUDIO;
+    var list = m && m.items && m.items[qid] && m.items[qid][kindName];
+    var e = list && list[i];
+    return e && e.text === base ? e.file : null;
+  }
+  function hasAudio(qid, kindName) {
+    var m = window.RCCM_AUDIO;
+    return !!(m && m.items && m.items[qid] && m.items[qid][kindName] && m.items[qid][kindName].length);
+  }
+  function canSpeak(qid, kindName) { return hasAudio(qid, kindName) || (hasSynth && !!jaVoice()); }
+
+  // 1つ分の文章を読み上げ、終わったら onend を呼ぶ。nextRaw は次に読む文（先読み用）
+  function say(qid, kindName, i, raw, onend, nextRaw) {
+    hush();
+    var base = speakableBase(raw);
+    var file = audioFile(qid, kindName, i, base);
+    var finished = false;
+    function done() { if (!finished) { finished = true; onend(); } }
+    function webSpeech() {
+      if (!hasSynth) { setTimeout(done, 1200); return; }
+      var u = new SpeechSynthesisUtterance(withReadings(base));
+      u.lang = "ja-JP";
+      var v = jaVoice();
+      if (v) u.voice = v;
+      u.rate = state.rate || 1;
+      u.onend = done;
+      u.onerror = function (e) { if (e.error !== "interrupted" && e.error !== "canceled") done(); };
+      synth.speak(u);
+    }
+    if (!file) { webSpeech(); return; }
+    var a = new Audio(file);
+    player = a;
+    a.playbackRate = state.rate || 1;
+    if ("preservesPitch" in a) a.preservesPitch = true;
+    a.onended = function () { if (player === a) done(); };
+    a.onerror = function () { if (player === a) { player = null; webSpeech(); } };
+    var p = a.play();
+    if (p && p.catch) p.catch(function () { if (player === a) { player = null; webSpeech(); } });
+    if (nextRaw != null) {
+      var nf = audioFile(qid, kindName, i + 1, speakableBase(nextRaw));
+      if (nf) { var pre = new Audio(nf); pre.preload = "auto"; }
+    }
+  }
+  function hush() {
+    if (player) { player.onended = null; player.onerror = null; player.pause(); player = null; }
+    if (synth) synth.cancel();
   }
 
   function stopSpeech() {
     speech.playing = false;
-    if (synth) synth.cancel();
+    hush();
     if (speech.nodes && speech.nodes[speech.idx]) speech.nodes[speech.idx].node.classList.remove("speaking");
     speech.idx = -1;
     if (speech.btn) speech.btn.textContent = "▶ 読み上げ";
@@ -153,26 +208,23 @@
     var item = speech.nodes[i];
     item.node.classList.add("speaking");
     item.node.scrollIntoView({ block: "center", behavior: reduceMotion() ? "auto" : "smooth" });
-    var u = new SpeechSynthesisUtterance(speakable(item.text));
-    u.lang = "ja-JP";
-    var v = jaVoice();
-    if (v) u.voice = v;
-    u.rate = state.rate || 1;
-    u.onend = function () { if (speech.playing && speech.idx === i) speakFrom(i + 1); };
-    u.onerror = function (e) { if (e.error !== "interrupted" && e.error !== "canceled") stopSpeech(); };
-    synth.speak(u);
+    var next = speech.nodes[i + 1];
+    say(speech.qid, "read", i, item.text, function () {
+      if (speech.playing && speech.idx === i) speakFrom(i + 1);
+    }, next ? next.text : null);
   }
 
   function reduceMotion() {
     return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
 
-  function addSpeech(nodes) {
-    if (!synth || typeof SpeechSynthesisUtterance === "undefined") {
+  function addSpeech(nodes, qid) {
+    if (!hasSynth && !hasAudio(qid, "read")) {
       tools().appendChild(el("span", "tool-note", "このブラウザは読み上げに対応していません"));
       return;
     }
     speech.nodes = nodes;
+    speech.qid = qid;
     var btn = el("button", "tool", "▶ 読み上げ");
     btn.type = "button";
     speech.btn = btn;
@@ -181,7 +233,7 @@
       start(Math.max(0, speech.idx));
     });
     function start(i) {
-      synth.cancel();
+      hush();
       speech.playing = true;
       btn.textContent = "■ 停止";
       speakFrom(i);
@@ -206,7 +258,9 @@
     });
     tools().appendChild(btn);
     tools().appendChild(rate);
-    if (!jaVoice() && synth.getVoices().length) {
+    if (hasAudio(qid, "read")) {
+      tools().appendChild(el("span", "tool-note", "音声：" + window.RCCM_AUDIO.credit));
+    } else if (hasSynth && !jaVoice() && synth.getVoices().length) {
       tools().appendChild(el("span", "tool-note", "日本語の音声が見つかりません。端末の設定で日本語の音声を追加してください"));
     }
   }
@@ -379,7 +433,7 @@
   function stopShow() {
     show.playing = false;
     clearTimeout(show.timer);
-    if (synth) synth.cancel();
+    hush();
     if (show.btn) show.btn.textContent = "▶ 自動で上演";
   }
 
@@ -472,12 +526,9 @@
           perform();
         }, 700);
       };
-      if (synth && typeof SpeechSynthesisUtterance !== "undefined" && jaVoice()) {
-        var u = new SpeechSynthesisUtterance(s.title + "。" + s.text);
-        u.lang = "ja-JP"; u.voice = jaVoice(); u.rate = state.rate || 1;
-        u.onend = after;
-        u.onerror = function (e) { if (e.error !== "interrupted" && e.error !== "canceled") after(); };
-        synth.speak(u);
+      if (canSpeak(q.id, "story")) {
+        var nx = scenes[idx + 1];
+        say(q.id, "story", idx, s.title + "。" + s.text, after, nx ? nx.title + "。" + nx.text : null);
       } else {
         show.timer = setTimeout(after, Math.max(4000, s.text.length * 110 / (state.rate || 1)));
       }
@@ -487,10 +538,11 @@
       if (idx === scenes.length - 1) { idx = 0; draw(-1); }
       show.playing = true;
       playBtn.textContent = "■ 止める";
-      if (synth) synth.cancel();
+      hush();
       perform();
     });
     tools().appendChild(playBtn);
+    if (hasAudio(q.id, "story")) tools().appendChild(el("span", "tool-note", "音声：" + window.RCCM_AUDIO.credit));
 
     view.appendChild(stage);
     view.appendChild(meta);
@@ -542,6 +594,10 @@
   // 音声の一覧は後から読み込まれることがある
   if (synth && synth.addEventListener) synth.addEventListener("voiceschanged", function () {});
   window.addEventListener("pagehide", function () { stopSpeech(); stopShow(); });
+
+  if (window.RCCM_AUDIO && window.RCCM_AUDIO.credit) {
+    document.getElementById("foot").textContent = "音声：" + window.RCCM_AUDIO.credit;
+  }
 
   render();
 })();
