@@ -1,0 +1,70 @@
+# GitHub のサーバー上で VOICEVOX を動かし、ずんだもんの音声を作って audio/ に保存します。
+# スマホからでも「Actions」タブ →「ずんだもん音声を作成」→「Run workflow」で実行できます。
+name: ずんだもん音声を作成
+
+on:
+  workflow_dispatch:
+    inputs:
+      speed:
+        description: "話す速さ（1.0 が標準）"
+        default: "1.0"
+        required: true
+      only:
+        description: "この設問だけ作る（1〜6。空欄なら全部）"
+        default: ""
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  voice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    services:
+      voicevox:
+        image: voicevox/voicevox_engine:cpu-latest
+        ports:
+          - 50021:50021
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ffmpeg を用意
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
+      - name: VOICEVOX の起動を待つ
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:50021/version; then echo; exit 0; fi
+            sleep 5
+          done
+          echo "VOICEVOX エンジンが起動しませんでした"; exit 1
+
+      - name: 音声を作成
+        env:
+          SPEED: ${{ inputs.speed }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          ARGS="--speed $SPEED"
+          if [ -n "$ONLY" ]; then ARGS="$ARGS --only $ONLY"; fi
+          python tools/generate_voice.py $ARGS
+
+      - name: audio/ を保存（コミット）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A audio
+          if git diff --cached --quiet; then echo "変更はありませんでした"; exit 0; fi
+          git commit -m "ずんだもん音声を更新"
+          git push
+
+      - name: GitHub Pages を更新
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds"
