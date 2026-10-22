@@ -16,7 +16,7 @@
 
 Python 3.8 以降の標準ライブラリだけで動きます。
 """
-import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request
+import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request, wave
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -73,6 +73,65 @@ def synthesize(engine, text, speaker, speed):
     q["postPhonemeLength"] = 0.2
     q["outputSamplingRate"] = 24000
     return api(engine, "/synthesis", {"speaker": speaker}, body=q, raw=True)
+
+
+# 1本につなぐときの、区切りの間の無音（秒）。紙芝居は場面の切り替えに少し間をあける
+GAPS = {"read": 0.0, "story": 0.6}
+
+
+def media_duration(path):
+    if path.endswith(".wav"):
+        with wave.open(path) as w:
+            return w.getnframes() / w.getframerate()
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return float(out)
+
+
+def build_all(paths, out_path, gap, fmt):
+    """行ごとの音声を1本につなぎ、各行の開始位置（秒）のリストを返す。
+    画面を消しても途切れずに再生できるようにするための音声"""
+    offsets, t = [], 0.0
+    for p in paths:
+        offsets.append(t)
+        t += media_duration(p) + gap
+
+    def fixed():
+        # mp3 は1本ごとに前後の詰め物（数十ミリ秒）があり、つなぐと少しずつ短くなる。そのずれを均等に補正する
+        delta = (t - media_duration(out_path)) / len(paths) if paths else 0
+        return [round(max(0.0, o - i * delta), 3) for i, o in enumerate(offsets)]
+
+    if os.path.exists(out_path):
+        return fixed()
+    if fmt == "wav":
+        frames, params = [], None
+        for p in paths:
+            with wave.open(p) as w:
+                params = params or w.getparams()
+                frames.append(w.readframes(w.getnframes()))
+                if gap:
+                    frames.append(b"\x00" * int(gap * w.getframerate()) * w.getsampwidth() * w.getnchannels())
+        with wave.open(out_path, "wb") as o:
+            o.setparams(params)
+            o.writeframes(b"".join(frames))
+        return fixed()
+    with tempfile.TemporaryDirectory() as td:
+        silence = None
+        if gap:
+            silence = os.path.join(td, "gap.mp3")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+                            "-t", str(gap), "-ac", "1", "-b:a", "64k", silence], check=True)
+        lines = []
+        for p in paths:
+            lines.append("file '%s'" % os.path.abspath(p).replace("'", "'\\''"))
+            if silence:
+                lines.append("file '%s'" % silence)
+        lst = os.path.join(td, "list.txt")
+        with open(lst, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst,
+                        "-ac", "1", "-ar", "24000", "-b:a", "64k", out_path], check=True)
+    return fixed()
 
 
 def main():
@@ -150,6 +209,14 @@ def main():
                 keep.add(fname)
                 entries.append({"text": base, "file": "audio/q%s/%s" % (qid, fname)})
             manifest["items"][qid][kind] = entries
+            # 全体を1本につないだ音声（バックグラウンド再生用）
+            names = [e["file"].rsplit("/", 1)[1] for e in entries]
+            ah = hashlib.sha1(("|".join(names) + "|%.2f" % GAPS.get(kind, 0)).encode("utf-8")).hexdigest()[:8]
+            all_name = "%s_all_%s.%s" % (kind, ah, fmt)
+            print("(%s) %s を1本につないでいます…" % (qid, kind))
+            offsets = build_all([os.path.join(qdir, n) for n in names], os.path.join(qdir, all_name), GAPS.get(kind, 0), fmt)
+            keep.add(all_name)
+            manifest["items"][qid][kind + "_all"] = {"file": "audio/q%s/%s" % (qid, all_name), "offsets": offsets}
         for old in os.listdir(qdir):  # 使われなくなった古い音声を削除
             if old not in keep:
                 os.remove(os.path.join(qdir, old))
