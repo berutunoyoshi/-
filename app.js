@@ -123,6 +123,9 @@
   var hasSynth = !!synth && typeof SpeechSynthesisUtterance !== "undefined";
   var speech = { idx: -1, nodes: null, playing: false, qid: null };
   var player = null;
+  // iPhone などで画面を消しても再生を続けるため、音声は1つの audio 要素を使い回す
+  var media = typeof Audio !== "undefined" ? new Audio() : null;
+  if (media) { media.preload = "auto"; if ("preservesPitch" in media) media.preservesPitch = true; }
 
   function jaVoice() {
     if (!synth) return null;
@@ -156,8 +159,8 @@
   }
   function canSpeak(qid, kindName) { return hasAudio(qid, kindName) || (hasSynth && !!jaVoice()); }
 
-  // 1つ分の文章を読み上げ、終わったら onend を呼ぶ。nextRaw は次に読む文（先読み用）
-  function say(qid, kindName, i, raw, onend, nextRaw) {
+  // 1つ分の文章を読み上げ、終わったら onend を呼ぶ
+  function say(qid, kindName, i, raw, onend) {
     hush();
     var base = speakableBase(raw);
     var file = audioFile(qid, kindName, i, base);
@@ -174,22 +177,78 @@
       u.onerror = function (e) { if (e.error !== "interrupted" && e.error !== "canceled") done(); };
       synth.speak(u);
     }
-    if (!file) { webSpeech(); return; }
-    var a = new Audio(file);
-    player = a;
-    a.playbackRate = state.rate || 1;
-    if ("preservesPitch" in a) a.preservesPitch = true;
-    a.onended = function () { if (player === a) done(); };
-    a.onerror = function () { if (player === a) { player = null; webSpeech(); } };
-    var p = a.play();
-    if (p && p.catch) p.catch(function () { if (player === a) { player = null; webSpeech(); } });
-    if (nextRaw != null) {
-      var nf = audioFile(qid, kindName, i + 1, speakableBase(nextRaw));
-      if (nf) { var pre = new Audio(nf); pre.preload = "auto"; }
-    }
+    if (!file || !media) { webSpeech(); return; }
+    player = media;
+    media.src = file;
+    setRate();
+    media.onended = done;
+    media.onerror = function () { media.onerror = null; webSpeech(); };
+    var p = media.play();
+    if (p && p.catch) p.catch(function () { webSpeech(); });
   }
+
+  // 1本につないだ音声（*_all）。全行の文章が一致するときだけ使う
+  function allTrack(qid, kindName, raws) {
+    var m = window.RCCM_AUDIO;
+    var t = m && m.items && m.items[qid] && m.items[qid][kindName + "_all"];
+    var list = m && m.items && m.items[qid] && m.items[qid][kindName];
+    if (!t || !list || list.length !== raws.length || !media) return null;
+    for (var i = 0; i < raws.length; i++) if (list[i].text !== speakableBase(raws[i])) return null;
+    return t;
+  }
+
+  function setRate() {
+    media.defaultPlaybackRate = state.rate || 1;
+    media.playbackRate = state.rate || 1;
+  }
+
+  // つないだ音声を startIdx の位置から再生する。区切りが変わるたびに onIndex(i) を呼ぶ
+  function playTrack(track, startIdx, onIndex, onEnd, title) {
+    hush();
+    player = media;
+    var cur = -1;
+    var same = media.getAttribute("src") === track.file;
+    if (!same) media.src = track.file;
+    setRate();
+    function seek(i) {
+      var go = function () { media.currentTime = track.offsets[i] + 0.01; };
+      if (media.readyState >= 1) go(); else media.addEventListener("loadedmetadata", go, { once: true });
+    }
+    seek(startIdx);
+    media.ontimeupdate = function () {
+      var t = media.currentTime, i = 0;
+      while (i + 1 < track.offsets.length && track.offsets[i + 1] <= t + 0.05) i++;
+      if (i !== cur) { cur = i; onIndex(i); }
+    };
+    media.onended = function () { clearSession(); onEnd(); };
+    media.onerror = null;
+    var p = media.play();
+    if (p && p.catch) p.catch(function () { onEnd(); });
+    setSession(title, function () { seek(Math.max(0, cur - 1)); }, function () { if (cur + 1 < track.offsets.length) seek(cur + 1); });
+    return { seek: seek };
+  }
+
+  // ロック画面に表示する曲名と操作ボタン（Media Session API）
+  function setSession(title, prev, next) {
+    if (!("mediaSession" in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: title, artist: (window.RCCM_AUDIO && window.RCCM_AUDIO.credit) || "", album: "RCCM 問題3 暗記ノート"
+      });
+      navigator.mediaSession.setActionHandler("play", function () { media.play(); });
+      navigator.mediaSession.setActionHandler("pause", function () { media.pause(); });
+      navigator.mediaSession.setActionHandler("previoustrack", prev);
+      navigator.mediaSession.setActionHandler("nexttrack", next);
+    } catch (e) { /* 未対応の操作は無視 */ }
+  }
+  function clearSession() {
+    if (!("mediaSession" in navigator)) return;
+    try { navigator.mediaSession.metadata = null; } catch (e) { /* 無視 */ }
+  }
+
   function hush() {
-    if (player) { player.onended = null; player.onerror = null; player.pause(); player = null; }
+    if (media) { media.onended = null; media.onerror = null; media.ontimeupdate = null; media.pause(); }
+    player = null;
     if (synth) synth.cancel();
   }
 
@@ -201,17 +260,21 @@
     if (speech.btn) speech.btn.textContent = "▶ 読み上げ";
   }
 
-  function speakFrom(i) {
-    if (!speech.playing || !speech.nodes || i >= speech.nodes.length) { stopSpeech(); return; }
+  function mark(i) {
     if (speech.nodes[speech.idx]) speech.nodes[speech.idx].node.classList.remove("speaking");
     speech.idx = i;
     var item = speech.nodes[i];
+    if (!item) return;
     item.node.classList.add("speaking");
-    item.node.scrollIntoView({ block: "center", behavior: reduceMotion() ? "auto" : "smooth" });
-    var next = speech.nodes[i + 1];
-    say(speech.qid, "read", i, item.text, function () {
+    if (!document.hidden) item.node.scrollIntoView({ block: "center", behavior: reduceMotion() ? "auto" : "smooth" });
+  }
+
+  function speakFrom(i) {
+    if (!speech.playing || !speech.nodes || i >= speech.nodes.length) { stopSpeech(); return; }
+    mark(i);
+    say(speech.qid, "read", i, speech.nodes[i].text, function () {
       if (speech.playing && speech.idx === i) speakFrom(i + 1);
-    }, next ? next.text : null);
+    });
   }
 
   function reduceMotion() {
@@ -232,11 +295,18 @@
       if (speech.playing) { stopSpeech(); return; }
       start(Math.max(0, speech.idx));
     });
+    var track = allTrack(qid, "read", nodes.map(function (n) { return n.text; }));
+    var ctl = null;
     function start(i) {
-      hush();
       speech.playing = true;
       btn.textContent = "■ 停止";
-      speakFrom(i);
+      if (track) {
+        if (ctl && player === media && !media.paused) { ctl.seek(i); return; }
+        ctl = playTrack(track, i, mark, stopSpeech, document.getElementById("qtitle").textContent);
+      } else {
+        hush();
+        speakFrom(i);
+      }
     }
     var rate = el("select", "tool");
     rate.setAttribute("aria-label", "読み上げの速さ");
@@ -249,7 +319,8 @@
     rate.addEventListener("change", function () {
       state.rate = parseFloat(rate.value);
       save();
-      if (speech.playing) start(speech.idx);
+      if (speech.playing && track) setRate();
+      else if (speech.playing) start(speech.idx);
     });
     // 行をタップすると、その行から読み上げる
     nodes.forEach(function (n, i) {
@@ -259,7 +330,7 @@
     tools().appendChild(btn);
     tools().appendChild(rate);
     if (hasAudio(qid, "read")) {
-      tools().appendChild(el("span", "tool-note", "音声：" + window.RCCM_AUDIO.credit));
+      tools().appendChild(el("span", "tool-note", "音声：" + window.RCCM_AUDIO.credit + (track ? "（画面を消しても再生を続けます）" : "")));
     } else if (hasSynth && !jaVoice() && synth.getVoices().length) {
       tools().appendChild(el("span", "tool-note", "日本語の音声が見つかりません。端末の設定で日本語の音声を追加してください"));
     }
@@ -527,17 +598,22 @@
         }, 700);
       };
       if (canSpeak(q.id, "story")) {
-        var nx = scenes[idx + 1];
-        say(q.id, "story", idx, s.title + "。" + s.text, after, nx ? nx.title + "。" + nx.text : null);
+        say(q.id, "story", idx, s.title + "。" + s.text, after);
       } else {
         show.timer = setTimeout(after, Math.max(4000, s.text.length * 110 / (state.rate || 1)));
       }
     }
+    var storyTrack = allTrack(q.id, "story", scenes.map(function (s) { return s.title + "。" + s.text; }));
     playBtn.addEventListener("click", function () {
       if (show.playing) { stopShow(); return; }
       if (idx === scenes.length - 1) { idx = 0; draw(-1); }
       show.playing = true;
       playBtn.textContent = "■ 止める";
+      if (storyTrack) {
+        playTrack(storyTrack, idx, function (j) { if (j !== idx) { var d = j > idx ? 1 : -1; idx = j; draw(document.hidden ? 0 : d); } },
+          stopShow, "紙芝居 " + document.getElementById("qtitle").textContent);
+        return;
+      }
       hush();
       perform();
     });
